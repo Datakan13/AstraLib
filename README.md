@@ -35,7 +35,7 @@ cmake -S . -B build-asan -DENABLE_ASAN=ON   # memory errors + UB
 See [docs/tests.md](docs/tests.md) for full test coverage and known findings.
 
 ## Notes 
-This project's source code was written entirely by the creator. The AI use is limited to documentation and test code(Test code have been overseen by the creator.).
+This project's source code was written entirely by the creator. The AI use is limited to documentation and test code (Test code have been overseen by the creator.). 
 
 ## License
 Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).

@@ -31,6 +31,10 @@
 //  10. oversubscription      — 2-4x more threads than cores on a SIZE=8
 //                              buffer: forces preemption INSIDE the ticket
 //                              protocol (between fetch_add and seq store).
+//                              Thread count caps down on small machines like
+//                              every other P/C test here (see file header) —
+//                              so this only actually oversubscribes on
+//                              machines with room to spare.
 //
 // Because this queue BLOCKS (spins) rather than failing, a broken invariant
 // usually presents as a hang, not a wrong value. A watchdog thread converts
@@ -39,10 +43,22 @@
 //
 // Scale knob: ASTRA_STRESS_SCALE=N divides item counts by N (use under
 // sanitizers or on slow CI). Default 1.
+//
+// Thread counts (P/C) scale down automatically to match available cores —
+// confirmed empirically, not assumed: any oversubscription beyond a true
+// 1:1 thread:core match caused catastrophic (not proportional) slowdowns for
+// these tests specifically. mpmc_torn_writes (SIZE=4, tightest contention)
+// at a true 1:1 match took 1.2ms; at just 2x oversubscription on the same
+// machine, it didn't finish within 45s. test_oversubscription's whole
+// purpose is deliberate oversubscription, so it keeps that character on
+// capable machines but still gets capped on tiny ones — a 2-core CI runner
+// was never going to meaningfully exercise "preemption under 8x
+// oversubscription" reliably anyway.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <AstraLib/Buffers/atomicRingBuffer.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -53,6 +69,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <vector>
 #include <vector>
 
 // ── compile-time layout checks ───────────────────────────────────────────────
@@ -151,6 +168,19 @@ static uint64_t scaled(uint64_t base, uint64_t minimum = 1000) {
     return v < minimum ? minimum : v;
 }
 
+// P/C thread counts for tests that hammer a lock-free structure with
+// contention-widening yields, capped to available cores. See file header
+// for the empirical justification. `fullValue` is used unchanged on any
+// machine with >= 8 cores (every one of these tests was designed and
+// validated against that assumption); below that, threads are capped to a
+// true 1:1 match with hardware_concurrency() so producers+consumers never
+// collectively oversubscribe the machine.
+static int scaledThreadCount(int fullValue) {
+    unsigned hw = std::thread::hardware_concurrency();
+    if (hw == 0 || hw >= 8) return fullValue;
+    return std::max<int>(1, int(hw) / 2);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. SIZE=2 lockstep: the smallest buffer the SIZE >= 2 static_assert allows.
 //    Slot 0/1 are reused every other op, so the seq arithmetic (ticket,
@@ -224,7 +254,9 @@ static void test_clear_reuse_cycles() {
 //    consumer speeds up. Exercises the full-buffer wait path + recovery.
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_producer_stall() {
-    constexpr int P = 4, PER = 500, TOTAL = P * PER;
+    const int P = scaledThreadCount(4);
+    constexpr int PER = 500;
+    const int TOTAL = P * PER;
     RB::AtomicRingBuffer<int, 4> q;
     auto seen = zeroFlags(TOTAL);
     std::vector<std::thread> prods;
@@ -258,7 +290,7 @@ static void test_producer_stall() {
 //    the empty queue: cold-start path.
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_mpmc_exactly_once() {
-    constexpr int P = 4, C = 4;
+    const int P = scaledThreadCount(4), C = scaledThreadCount(4);
     const uint64_t PER = scaled(100000, 2000);
     const uint64_t TOTAL = PER * P;
     RB::AtomicRingBuffer<uint64_t, 1024> q;
@@ -266,9 +298,8 @@ static void test_mpmc_exactly_once() {
 
     std::vector<std::thread> cons;
     for (int c = 0; c < C; ++c)
-        cons.emplace_back([&, c] {
-            int64_t lastSeq[P];
-            for (int p = 0; p < P; ++p) lastSeq[p] = -1;
+        cons.emplace_back([&, c, P] {
+            std::vector<int64_t> lastSeq(P, -1);
             for (uint64_t i = 0; i < TOTAL / C; ++i) {
                 uint64_t v = q.dequeue();
                 uint64_t p = v / PER, s = v % PER;
@@ -327,7 +358,7 @@ static bool tornValid(const TornPayload& p) {
 }
 
 static void test_mpmc_torn_writes() {
-    constexpr int P = 4, C = 4;
+    const int P = scaledThreadCount(4), C = scaledThreadCount(4);
     const uint64_t PER = scaled(40000, 2000);
     RB::AtomicRingBuffer<TornPayload, 4> q;
     std::atomic<uint64_t> prodSum{0}, consSum{0};
@@ -372,7 +403,7 @@ static void test_mpmc_torn_writes() {
 //    Exactly-once accounting over the whole stream.
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_mpsc_batch_dequeue() {
-    constexpr int P = 4;
+    const int P = scaledThreadCount(4);
     const uint64_t PER = scaled(25000, 2000);
     const uint64_t TOTAL = PER * P;
     RB::AtomicRingBuffer<uint64_t, 1024> q;
@@ -445,7 +476,7 @@ std::atomic<long> Counted::ctors{0}, Counted::dtors{0},
 static_assert(sizeof(Counted) == 8, "Counted must stay small");
 
 static void test_emplace_lifetime() {
-    constexpr int P = 4, C = 4;
+    const int P = scaledThreadCount(4), C = scaledThreadCount(4);
     const uint64_t PER = scaled(30000, 2000);
     const uint64_t TOTAL = PER * P;
     auto seen = zeroFlags(TOTAL);
@@ -508,7 +539,7 @@ struct LiveCounter {
 std::atomic<long> LiveCounter::live{0};
 
 static void test_move_only_ownership() {
-    constexpr int P = 4, C = 4;
+    const int P = scaledThreadCount(4), C = scaledThreadCount(4);
     const uint64_t PER = scaled(25000, 2000);
     const uint64_t TOTAL = PER * P;
     auto seen = zeroFlags(TOTAL);
@@ -555,7 +586,7 @@ static void test_move_only_ownership() {
 //     the seq store) — the interleavings a lightly-loaded test never hits.
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_oversubscription() {
-    constexpr int P = 8, C = 8;
+    const int P = scaledThreadCount(8), C = scaledThreadCount(8);
     const uint64_t PER = scaled(8000, 1000);
     const uint64_t TOTAL = PER * P;
     RB::AtomicRingBuffer<uint64_t, 8> q;

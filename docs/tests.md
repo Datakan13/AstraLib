@@ -30,6 +30,45 @@ Note: on this machine (gcc-11, WSL2/newer kernel), TSan's runtime can abort
 with `unexpected memory mapping` due to ASLR entropy. Work around it with
 `setarch $(uname -m) -R ./your_test`.
 
+### Automatic scaling on small machines
+
+Several tests deliberately spawn more threads than a typical dev machine has
+cores, with `std::this_thread::yield()` (or, for `AtomicRingBufferStressTest`,
+tight busy-spin contention) *inside* the held lock/slot — a technique used
+throughout this suite to widen the timing window a broken lock/pool could
+slip through. That's harmless on a many-core machine, but on a small CI
+runner (GitHub's hosted `ubuntu-latest` gives 2 vCPUs) it's catastrophic, not
+just slower: confirmed directly via `taskset -c 0,1` locally, e.g.
+`SpinlockTest`'s `mutual_exclusion_wide_critical_section` at a true 1:1
+thread:core match took 1.7ms; at just 2x oversubscription on the same
+constrained run, it took 17 *seconds* — roughly a 10,000x cliff, not a
+proportional slowdown. The same pattern reproduced in
+`ThreadSafeIndexPoolTest` (0.3ms → 8.1s) and `AtomicRingBufferStressTest`'s
+`mpmc_torn_writes` (1.2ms at 1:1 → still not finished after 45s at 2x).
+
+Fix: `SpinlockTest.cpp`'s `mutual_exclusion_wide_critical_section`,
+`ThreadSafeIndexPoolTest.cpp`'s `no_double_checkout_under_contention`, and
+every P/C-thread test in `AtomicRingBufferStressTest.cpp` now cap their
+thread counts to `std::thread::hardware_concurrency()` automatically at
+runtime — no env var, no manual configuration. On any machine with 8+ cores
+(including the one this suite was developed and verified on all session)
+they're unchanged from their original, already-validated parameters; below
+that, thread counts scale down to a true 1:1 match with available cores.
+`test_oversubscription`'s whole purpose is deliberate oversubscription, so
+it keeps that character on capable machines but caps down the same way on
+tiny ones — a 2-core runner was never going to meaningfully exercise "8x
+oversubscription" reliably regardless.
+
+Known verification limit: `std::thread::hardware_concurrency()` reads
+`/sys/devices/system/cpu/online` directly (confirmed via `strace`), not
+`sysconf()`, so it can't be faked locally with `taskset` or a simple
+`LD_PRELOAD` shim — both were tried. What's verified directly: the *specific
+downscaled parameter values* chosen (thread count exactly matching core
+count) are fast under real core-constrained execution. What's **not**
+verified locally: that the `hardware_concurrency() < 8` branch itself
+actually fires correctly on a genuine small-core machine — that only a real
+run (e.g. GitHub Actions' 2-vCPU runner) can confirm.
+
 ## What's covered
 
 | File | Covers |
@@ -142,6 +181,14 @@ Bugs found by these tests so far, in order of severity:
    count, correct FIFO remainder) in every build; running the suite under
    `-DENABLE_ASAN=ON` additionally pulls in UBSan's hard bounds check on
    top. Verified both ways: clean under a plain build and under ASan/UBSan.
+8. **Fixed, test-suite-only — not a library bug.** Three tests
+   (`SpinlockTest`, `ThreadSafeIndexPoolTest`, `AtomicRingBufferStressTest`)
+   hung/timed out on GitHub Actions' 2-vCPU runner despite being fully clean
+   on this machine's 20 cores. Root cause was in the tests, not the library:
+   deliberate thread-oversubscription-plus-yield-while-holding patterns that
+   are fine with headroom but catastrophic (~10,000x, not proportional) once
+   threads outnumber real cores. See "Automatic scaling on small machines"
+   above for the fix and its verification limits.
 
 These are left for deliberate fixes rather than patched inside the test
 files — the tests exist to locate and explain them precisely, not to paper

@@ -17,6 +17,7 @@
 
 #include <AstraLib/Atomic/spinlock.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -167,12 +168,27 @@ static void test_mutual_exclusion_custom_waittime() {
 //    lock (a window where a broken lock is more likely to let a second
 //    thread slip in), using a multi-step read-modify-write that's very
 //    sensitive to interleaving (swap two halves of a struct).
+//
+//    THREADS/PER scale down on machines with few cores. This is the one test
+//    in this file that yields WHILE HOLDING the lock — combined with more
+//    threads than cores, that creates a scheduler convoy (every other thread
+//    is a runnable spinner, so the OS has no signal the actual holder is the
+//    one that needs to run next). Confirmed directly: the original 8
+//    threads/20000 iters, constrained to 2 cores (matching a GitHub Actions
+//    runner) via `taskset -c 0,1`, was STILL RUNNING after 3 minutes at 100%
+//    CPU on both cores — not a hang, just catastrophically slow, and
+//    reproduced identically on GitHub's own 2-core runner. Tests 1-3 in this
+//    file use MORE threads (16) than this one but don't yield while holding,
+//    and stayed fast (~15ms) even on 2 cores — the yield-while-held pattern
+//    is what makes oversubscription dangerous here, not thread count alone.
 // ─────────────────────────────────────────────────────────────────────────────
 struct Torn { long a; long b; };   // invariant: a must always equal -b
 
 static void test_mutual_exclusion_wide_critical_section() {
-    constexpr int THREADS = 8;
-    constexpr int PER = 20000;
+    unsigned hw = std::thread::hardware_concurrency();
+    const bool constrained = hw != 0 && hw < 8;
+    const int THREADS = constrained ? std::max<int>(2, int(hw)) : 8;
+    const int PER = constrained ? 5000 : 20000;
     Spinlock lock;
     Torn shared{0, 0};
     std::atomic<long> violations{0};

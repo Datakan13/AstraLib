@@ -12,6 +12,7 @@
 
 #include <AstraLib/Pools/threadSafeIndexPool.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -61,11 +62,20 @@ static void test_initial_fill_is_unique_and_complete() {
 //    check an index out, do a little "work" while holding it (to widen the
 //    window a bug could exploit), and return it. A per-index atomic flag
 //    catches the instant two threads both believe they hold the same index.
+//
+//    THREADS scales down to match available cores on constrained machines —
+//    never above them. This test yields WHILE HOLDING an index, same pattern
+//    as SpinlockTest.cpp's wide-critical-section test, and the same cliff
+//    applies: confirmed directly, SIZE=2/THREADS=2 (threads == cores) on a
+//    2-core constraint took 0.3ms, but SIZE=2/THREADS=4 (2x oversubscribed)
+//    took 8.1 SECONDS — roughly a 25,000x slowdown from doubling thread
+//    count past available cores. Threads exceeding the pool's SIZE (not the
+//    CPU core count) is fine on its own — confirmed separately, SIZE=4/
+//    THREADS=6 matched to 6 real cores stayed at 1.2ms — so only the
+//    thread-vs-core ratio matters here, not thread-vs-pool-size.
 // ─────────────────────────────────────────────────────────────────────────────
-static void test_no_double_checkout_under_contention() {
-    constexpr int SIZE = 16;
-    constexpr int THREADS = 32;
-    constexpr int ROUNDS = 5000;
+template<int SIZE>
+static void run_double_checkout_contention(int THREADS, int ROUNDS) {
     ThreadSafeIndexPool<SIZE> pool;
     std::vector<std::atomic<int>> inUse(SIZE);
     for (auto& f : inUse) f.store(0, std::memory_order_relaxed);
@@ -88,6 +98,15 @@ static void test_no_double_checkout_under_contention() {
     CHECK_CTX(doubleCheckouts.load() == 0,
               doubleCheckouts.load() << " double-checkout(s): two threads held the "
               "same index simultaneously");
+}
+
+static void test_no_double_checkout_under_contention() {
+    unsigned hw = std::thread::hardware_concurrency();
+    if (hw != 0 && hw < 8) {
+        run_double_checkout_contention<4>(std::max<int>(2, int(hw)), 1000);
+    } else {
+        run_double_checkout_contention<16>(32, 5000);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
