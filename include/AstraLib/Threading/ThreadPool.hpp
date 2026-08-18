@@ -171,6 +171,9 @@ private:
             }
             if(taskQueue.isEmpty()) {
                 taskGate.reset();
+                if (!taskQueue.isEmpty()) {
+                    taskGate.signaler();
+                }
             }
         }
     }
