@@ -59,15 +59,14 @@ it keeps that character on capable machines but caps down the same way on
 tiny ones — a 2-core runner was never going to meaningfully exercise "8x
 oversubscription" reliably regardless.
 
-Known verification limit: `std::thread::hardware_concurrency()` reads
-`/sys/devices/system/cpu/online` directly (confirmed via `strace`), not
-`sysconf()`, so it can't be faked locally with `taskset` or a simple
-`LD_PRELOAD` shim — both were tried. What's verified directly: the *specific
-downscaled parameter values* chosen (thread count exactly matching core
-count) are fast under real core-constrained execution. What's **not**
-verified locally: that the `hardware_concurrency() < 8` branch itself
-actually fires correctly on a genuine small-core machine — that only a real
-run (e.g. GitHub Actions' 2-vCPU runner) can confirm.
+`std::thread::hardware_concurrency()` reads `/sys/devices/system/cpu/online`
+directly (confirmed via `strace`), not `sysconf()`, so the branch itself
+couldn't be faked locally with `taskset` or `LD_PRELOAD` (both tried) — only
+the chosen parameter values were verified locally, not the branch firing.
+Confirmed on GitHub Actions' real 2-vCPU runner: full suite green,
+`SpinlockTest`/`ThreadSafeIndexPoolTest`/`AtomicRingBufferStressTest` all
+fast (0.11s/0.01s/0.06s) rather than hitting their old deadlines — the
+`hw < 8` branch does fire correctly there.
 
 ## What's covered
 
