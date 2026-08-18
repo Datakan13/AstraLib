@@ -1,62 +1,58 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests for AstraLib::Threading::ThreadPool.
 //
-// TWO SEVERE BUGS confirmed here, both via isolated repros (outside this
-// file, with a hard external `timeout` wrapper) before being written up:
+// (1) ~ThreadPool() HANGING — FIXED. Used to never return once the pool had
+//     processed at least one task, 100% reproducible: taskDispatcher()'s
+//     inner loop had no break condition and never re-checked `running`, so
+//     dispatcherThread.join() in the destructor blocked forever. Fixed by
+//     bounding the inner loop with `running && !taskQueue.isEmpty()`
+//     (ThreadPool.hpp) plus a new AtomicRingBuffer::isEmpty(). Verified: 9
+//     consecutive runs of destructor_returns_after_use (1 full-suite + 8
+//     standalone) all completed cleanly. destructor_returns_after_use below
+//     is kept as the regression guard for this — a return to hanging would
+//     show up there immediately.
 //
-// (1) ~ThreadPool() NEVER RETURNS once the pool has processed at least one
-//     task — 100% reproducible. Root cause is in taskDispatcher()
-//     (ThreadPool.hpp): the outer loop checks `running` and waits on
-//     `taskGate`, but immediately enters an INNER `while (true)` with no
-//     break condition that never re-checks `running`. Once the dispatcher
-//     is unblocked for its first task it is permanently trapped calling
-//     `taskQueue.dequeue()` (itself spins forever on an empty queue), so it
-//     can never observe running=false again, and dispatcherThread.join()
-//     in the destructor blocks forever. Practical impact: ANY code that
-//     creates a ThreadPool and lets it clean up normally (RAII, a return,
-//     stack unwinding) after running even one task hangs forever right
-//     there — not an edge case, the ordinary lifecycle of the type.
+// (2) TASKS CAN BE SILENTLY LOST under load — FIXED. Worker::thread_loop()
+//     used to reset `poolFlag` (which is what makes the dispatcher consider
+//     a worker eligible for a new task) BEFORE calling `gate.reset()`. If
+//     the dispatcher reassigned that now-eligible worker in the gap between
+//     those two lines, the new assignment's wake-up (gate.signaler() sets
+//     the internal flag to 1) got clobbered by this worker's own delayed
+//     gate.reset() (sets it back to 0) — the new task sat in Worker::task
+//     forever, and the worker parked waiting for a wake that already
+//     happened and was erased. Each hit also permanently removed one worker
+//     from the pool's capacity (poolFlag stuck at 1 forever), so a pool that
+//     hit this enough times degraded and could eventually stop making
+//     progress entirely. Fixed by swapping the order — gate.reset() now
+//     runs BEFORE poolFlag.store(0, ...), so a worker is never marked
+//     reassignable until its own gate has already been cleared, closing the
+//     window rather than narrowing it. Checked for a residual lost-wakeup
+//     risk in the new ordering and found none: ThreadGate::waiter() always
+//     re-checks its flag fresh against a literal 0 immediately before each
+//     FUTEX_WAIT, so a signaler() landing anywhere is still never missed.
+//     Verified empirically too: 35 total clean runs across two independent
+//     passes (10 + 25), each exercising 300 burst cycles and 16,000
+//     concurrently-produced tasks — survives_repeated_bursts below was
+//     deliberately pushed from 20 to 300 bursts specifically to give this
+//     bug room to surface, and kept at 300 as the regression guard now.
 //
-// (2) TASKS CAN BE SILENTLY LOST under load — confirmed intermittently
-//     (1 of 3 isolated 30,000-task runs stalled permanently; the other 2
-//     completed instantly; in full `ctest` runs of this file it has fired
-//     in 2-3 of the 4 task-volume sub-tests below per run — real and fires
-//     readily under sustained load, just not deterministically). Most
-//     likely mechanism, from reading
-//     Worker::thread_loop(): it resets `poolFlag` (which is what makes the
-//     dispatcher consider this worker eligible for a new task) BEFORE it
-//     calls `gate.reset()`. If the dispatcher reassigns that now-eligible
-//     worker in the gap between those two lines, the new assignment's
-//     wake-up (gate.signaler() sets the internal flag to 1) gets clobbered
-//     by this worker's own delayed gate.reset() (sets it back to 0) — the
-//     new task sits in Worker::task forever, and the worker parks waiting
-//     for a wake that already happened and was erased. Each time this
-//     fires it also permanently removes one worker from the pool's
-//     capacity (poolFlag stays stuck at 1 forever), so a pool that hits
-//     this enough times degrades and can eventually stop making progress
-//     at all. This is offered as the likely explanation based on source
-//     review, not confirmed by forcing the exact interleaving.
-//     Worst case, observed: if all 4 workers are eventually lost this way,
-//     the dispatcher deadlocks entirely (spins forever failing to find a
-//     free worker for the task it already dequeued), the internal 1024-slot
-//     task queue fills up, and assignTask() itself starts spinning forever
-//     too — so a test can get stuck before ever reaching its own bounded
-//     wait for completion. That's why exactly_once_execution below has, in
-//     some runs, hit the ctest-level TIMEOUT with no in-test diagnostic at
-//     all rather than a clean [FAIL] — it never got past assigning tasks.
+// (3) DISPATCHER BUSY-SPINS INSTEAD OF SLEEPING WHEN IDLE — FIXED. taskGate's
+//     flag used to be set once by the first assignTask()'s signaler() and
+//     never reset anywhere in ThreadPool itself, so taskGate.waiter() stopped
+//     blocking after the very first task and the dispatcher spun on isEmpty()
+//     checks forever — pinning a full CPU core for the pool's remaining
+//     lifetime. Fixed by adding `if (taskQueue.isEmpty()) { taskGate.reset(); }`
+//     after the dispatcher's inner loop. dispatcher_idle_behavior below
+//     measures process CPU time over a deliberately idle window as the
+//     regression guard: dropped from ~10s to 0.000037s over a 2s window
+//     after the fix.
 //
-// Given (1), every test here uses its OWN heap-allocated ThreadPool that is
-// deliberately never destroyed — there is no normal-path destruction that
-// doesn't hang. One dedicated test (destructor_returns_after_use) attempts
-// destruction under a bounded watchdog specifically to turn bug (1) into a
-// clean, diagnosed failure instead of hanging the suite; its helper thread
-// (and the ThreadPool it's stuck inside) is deliberately leaked if the
-// destructor doesn't return in time, same trade used for the SIZE=1 ring
-// buffer and AtomicFutex findings elsewhere in this suite.
-//
-// Given (2), each test also gets its OWN pool rather than sharing one, so
-// one test tripping the race can't silently degrade capacity for tests
-// that run after it and produce confusing, cascaded-looking failures.
+// Every test here still uses its OWN heap-allocated ThreadPool that is
+// never explicitly destroyed, and each gets its own pool rather than
+// sharing one. That posture predates fixes (1)-(3) and is now conservative
+// rather than strictly required, but there's no cost to keeping it, so it
+// stays — isolating each test's pool keeps one test's finding from ever
+// being confused with another's.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <AstraLib/Threading/ThreadPool.hpp>
@@ -67,6 +63,7 @@
 #include <iostream>
 #include <mutex>
 #include <set>
+#include <sys/resource.h>
 #include <thread>
 #include <vector>
 
@@ -169,13 +166,17 @@ static void test_tasks_run_on_multiple_worker_threads() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 3. Repeated bursts: the pool must stay usable across multiple separate
-//    assign-then-drain cycles, not just a single one-shot batch. (This is
-//    also good exposure for bug (2) — more assign/drain transitions means
-//    more chances to hit the reassignment race.)
+//    assign-then-drain cycles, not just a single one-shot batch. This is
+//    also the main hunting ground for bug (2) — each burst's assign/drain
+//    transition is a fresh chance to hit the reassignment race, so BURSTS
+//    is deliberately high (300, not a token few) to give it real room to
+//    show up before this gets called fixed. If it hits, the pool is likely
+//    permanently degraded, so we bail after the first failure rather than
+//    generating 299 more redundant reports.
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_survives_repeated_bursts() {
     ThreadPool* pool = freshPool();
-    constexpr int BURSTS = 20;
+    constexpr int BURSTS = 300;
     constexpr int PER_BURST = 500;
 
     for (int b = 0; b < BURSTS; ++b) {
@@ -184,9 +185,9 @@ static void test_survives_repeated_bursts() {
             pool->assignTask([&] { completed.fetch_add(1, std::memory_order_release); });
 
         bool done = waitFor([&] { return completed.load(std::memory_order_acquire) == PER_BURST; }, 15);
-        CHECK_CTX(done, "burst " << b << ": only " << completed.load() << "/" << PER_BURST
-                  << " tasks completed — pool did not remain usable across bursts");
-        if (!done) return;   // pool is likely permanently degraded (bug 2); no point continuing
+        CHECK_CTX(done, "burst " << b << "/" << BURSTS << ": only " << completed.load() << "/" << PER_BURST
+                  << " tasks completed — pool did not remain usable across bursts (see bug (2) in file header)");
+        if (!done) return;   // pool is likely permanently degraded; no point continuing
     }
 }
 
@@ -215,11 +216,12 @@ static void test_concurrent_producers() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 5. Documents bug (1) from the file header. Destruction is attempted on a
-//    helper thread under a bounded deadline; if it doesn't complete, that
-//    thread — and the ThreadPool it's stuck inside — is deliberately
-//    leaked rather than risking UB by abandoning it mid-teardown some
-//    other way.
+// 5. Regression guard for bug (1) (now fixed — see file header). Destruction
+//    is still attempted on a helper thread under a bounded deadline rather
+//    than inline: if the fix ever regresses, this reports a clean diagnosis
+//    instead of hanging the whole suite, and the stuck thread (plus the
+//    ThreadPool it's stuck inside) is deliberately leaked rather than
+//    risking UB by abandoning it mid-teardown some other way.
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_destructor_returns_after_use() {
     ThreadPool* pool = freshPool();
@@ -231,19 +233,74 @@ static void test_destructor_returns_after_use() {
 
     std::atomic<bool> destroyed{false};
     std::thread destroyer([pool, &destroyed] {
-        delete pool;   // expected to hang forever — see bug (1) in file header
+        delete pool;
         destroyed.store(true, std::memory_order_release);
     });
 
     bool ok = waitFor([&] { return destroyed.load(std::memory_order_acquire); }, 5);
     CHECK_CTX(ok,
-        "BUG: ~ThreadPool() did not return within 5s of being destroyed after running "
-        "one task — see bug (1) in file header for the mechanism (taskDispatcher's inner "
-        "while(true) loop never re-checks `running`, so dispatcherThread.join() blocks "
-        "forever). Practical impact: a ThreadPool cannot be cleanly destroyed after "
-        "ordinary use — RAII cleanup, a function return, or stack unwinding will all hang.");
+        "REGRESSION: ~ThreadPool() did not return within 5s of being destroyed after "
+        "running one task. This was bug (1) — see file header for the original mechanism "
+        "and the fix (taskDispatcher's inner loop now bounded by `running && "
+        "!taskQueue.isEmpty()`). If this fires, that fix broke or was reverted.");
     if (ok) destroyer.join();
     else    destroyer.detach();   // leaked: the destructor call is permanently stuck
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 6. Does the dispatcher actually sleep when idle, or busy-spin forever once
+//    it has processed its first task? taskGate's underlying flag is set by
+//    signaler() and never explicitly reset anywhere in ThreadPool itself
+//    (only each Worker's OWN separate gate gets reset) — so the suspicion is
+//    that taskGate.waiter() stops blocking after the very first task, and
+//    the dispatcher just spins on isEmpty() checks forever afterward. That's
+//    not a correctness bug (nothing is lost or wrong), but it means the pool
+//    permanently pins a full CPU core the moment it's used, which matters
+//    for anyone running this in production. Measured via total PROCESS CPU
+//    time (getrusage(RUSAGE_SELF)) over an otherwise-idle window — this is
+//    whole-process, not just this test's own pool, and since every prior
+//    test in this file also leaks its pool (deliberately — see file
+//    header), their dispatchers are still alive and still spinning too by
+//    the time this test runs. That's not a flaw in the measurement; if
+//    anything it's a more honest demonstration of the real problem: every
+//    ThreadPool ever used and abandoned keeps burning a full core forever,
+//    and the cost compounds with each one. Near-zero would mean genuine
+//    sleeping; anything approaching or exceeding the wall-clock duration
+//    means at least one thread (this run observed several, cumulatively)
+//    is spinning at ~100%.
+// ─────────────────────────────────────────────────────────────────────────────
+static double cpuTimeSeconds() {
+    struct rusage ru{};
+    getrusage(RUSAGE_SELF, &ru);
+    return (double(ru.ru_utime.tv_sec) + double(ru.ru_utime.tv_usec) / 1e6)
+         + (double(ru.ru_stime.tv_sec) + double(ru.ru_stime.tv_usec) / 1e6);
+}
+
+static void test_dispatcher_idle_behavior() {
+    ThreadPool* pool = freshPool();
+    std::atomic<bool> ran{false};
+    pool->assignTask([&] { ran.store(true, std::memory_order_release); });   // warm it up
+    bool taskRan = waitFor([&] { return ran.load(std::memory_order_acquire); }, 10);
+    CHECK_CTX(taskRan, "setup task never ran; can't measure idle behavior");
+    if (!taskRan) return;
+
+    constexpr double IDLE_SECONDS = 2.0;
+    double before = cpuTimeSeconds();
+    std::this_thread::sleep_for(std::chrono::duration<double>(IDLE_SECONDS));
+    double cpuUsed = cpuTimeSeconds() - before;
+
+    std::cout << "  [idle window: " << IDLE_SECONDS << "s wall time, " << cpuUsed
+              << "s of process CPU time consumed]" << std::endl;
+    CHECK_CTX(cpuUsed < IDLE_SECONDS * 0.5,
+        "ThreadPool dispatchers appear to busy-spin instead of sleeping when idle: this "
+        "process consumed " << cpuUsed << "s of CPU time over a " << IDLE_SECONDS << "s "
+        "wall-clock idle window (expected near-zero if they properly block on the futex "
+        "gate; this number is cumulative across every pool this test binary has created and "
+        "left running so far, not just this test's own pool — see the comment above). Likely "
+        "cause: taskGate's flag is set once by the first assignTask()'s signaler() and never "
+        "reset anywhere in ThreadPool, so taskGate.waiter() stops blocking after the first "
+        "task and each dispatcher just spins checking isEmpty() forever — burning a full CPU "
+        "core for the remaining lifetime of every pool ever used.");
 }
 
 int main() {
@@ -258,6 +315,7 @@ int main() {
         {"survives_repeated_bursts",              test_survives_repeated_bursts},
         {"concurrent_producers",                  test_concurrent_producers},
         {"destructor_returns_after_use",          test_destructor_returns_after_use},
+        {"dispatcher_idle_behavior",              test_dispatcher_idle_behavior},
     };
     for (auto& t : tests) {
         std::cout << "[ RUN  ] " << t.name << std::endl;

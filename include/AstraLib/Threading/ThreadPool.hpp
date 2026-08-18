@@ -13,16 +13,6 @@ namespace Threading {
 
 constexpr size_t threadCount = 4;
 
-void set_low_priority(std::thread &t) {
-    sched_param sch_params;
-    sch_params.sched_priority = 0; // lowest for SCHED_OTHER
-
-    // Default Linux threads use SCHED_OTHER, which ignores sched_priority.
-    // To make priority changes effective, you’d need SCHED_BATCH or SCHED_IDLE.
-    pthread_setschedparam(t.native_handle(), SCHED_IDLE, &sch_params);
-}
-
-
 // ─────────────────────────────────────────────
 // Lightweight futex-based gate for thread sleep/wake
 // ─────────────────────────────────────────────
@@ -30,7 +20,9 @@ class ThreadGate {
     std::atomic<int>& flag;
 
 public:
-    explicit ThreadGate(std::atomic<int>& flag_) : flag(flag_) {}
+    explicit ThreadGate(std::atomic<int>& flag_) : flag(flag_) {
+        flag.store(0,std::memory_order_release);
+    }
 
     void waiter() {
         while (true) {
@@ -75,10 +67,10 @@ private:
                 task(); // Execute assigned task
                 task = nullptr;
 
+                gate.reset();  // Reset internal gate
                 // Mark worker as available again
                 poolFlag.store(0, std::memory_order_release);
                 std::atomic_thread_fence(std::memory_order_seq_cst);
-                gate.reset();  // Reset internal gate
             }
         }
     }
@@ -140,7 +132,7 @@ private:
             taskGate.waiter();
             std::atomic_thread_fence(std::memory_order_acquire);
 
-            while (true) {
+            while (true && running && !taskQueue.isEmpty()) {
                 task = taskQueue.dequeue();
                 size_t start = id;
                 bool assigned = false;
@@ -176,6 +168,9 @@ private:
                     
                 }
                 
+            }
+            if(taskQueue.isEmpty()) {
+                taskGate.reset();
             }
         }
     }

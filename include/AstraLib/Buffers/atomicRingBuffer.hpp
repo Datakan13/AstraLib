@@ -99,8 +99,10 @@ class AtomicRingBuffer {
     }
 
     //WARNING: only use in MPSC paths
-    // A max of 50 can be dequeued at a time for defauly construction.
-    std::array<A,BATCH_SIZE>* batchDequeue(const int count) {
+    // A max of 50 can be dequeued at a time for default construction.
+    // If count is bigger than BATCH_SIZE, it will be reduced to BATCH_SIZE.
+    std::array<A,BATCH_SIZE>* batchDequeue(int count) {
+        if(count > BATCH_SIZE) count = BATCH_SIZE;
         for(int i = 0; i< count; i++) {
             uint64_t ticket = readTicket.value.fetch_add(1,std::memory_order_acq_rel);
             int index = ticket & (SIZE - 1);
@@ -112,6 +114,10 @@ class AtomicRingBuffer {
             buffer[index].seq.store(ticket+SIZE,std::memory_order_release);
         }
         return &batchDequeueArray;
+    }
+
+    bool isEmpty() {
+        return writeTicket.value.load(std::memory_order_acquire) == readTicket.value.load(std::memory_order_acquire);
     }
 
     public:

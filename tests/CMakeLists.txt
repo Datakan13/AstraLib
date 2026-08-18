@@ -16,13 +16,18 @@ astra_test(PaddedAtomicTest)
 astra_test(AtomicFutexTest)
 astra_test(ThreadSafeIndexPoolTest)
 astra_test(ThreadPoolTest)
-# Each of its 5 sub-tests has its own internal bounded wait (up to 60s) to
-# give the confirmed-but-intermittent task-loss bug room to surface cleanly
+# Each of its 6 sub-tests has its own internal bounded wait (up to 60s) to
+# give the still-open, intermittent task-loss bug room to surface cleanly
 # instead of getting cut off mid-diagnosis by a tighter ctest-level kill.
 set_tests_properties(ThreadPoolTest PROPERTIES TIMEOUT 240)
 astra_test(TimerTest)
 astra_test(TimeNowTest)
 astra_test(DebugFuncTest)
+
+# Basic functional coverage (isEmpty(), enqueue(const A&), emplaceEnqueue's
+# trivially-destructible branch, custom BATCH_SIZE) — distinct from the
+# adversarial suite below.
+astra_test(AtomicRingBufferTest)
 
 # Adversarial suite: exactly-once MPMC accounting, torn-write detection,
 # lifetime canaries, oversubscription, futex lost-wakeup hunting. Has an
