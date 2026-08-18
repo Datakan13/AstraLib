@@ -1,5 +1,9 @@
 # AstraLib
-AstraLib is a C++20 concurrency library focused on performance. It includes atomic helpers, an MPMC ring buffer, a thread-safe debug function, a thread-safe index pool, a thread pool, and timer utilities.
+![CI](https://github.com/Datakan13/AstraLib/actions/workflows/ci.yml/badge.svg)
+
+AstraLib grew out of building low-latency trading infrastructure, where determinism and shaving off every possible nanosecond mattered more than being able to handle every workload well. General-purpose concurrency primitives — `std::mutex`, off-the-shelf concurrent queues — are built to be correct and reasonable across a huge range of use cases, and that generality has a cost. AstraLib takes the opposite bet: a small set of primitives, each built for one narrow pattern, so you only pay for the guarantees you actually need.
+
+It's a C++20 concurrency library: atomic helpers, an MPMC ring buffer, a thread-safe debug function, a thread-safe index pool, a thread pool, and timer utilities.
 
 ## Requirements
 - Linux, x86/x86-64 — uses raw Linux futex syscalls and x86 intrinsics directly, so it isn't portable to other platforms as-is
@@ -22,6 +26,15 @@ AstraLib is header-only. Add `include/` to your project's include path, or consu
 - **Debug** — `debugMessage`
 
 Include everything at once via `<AstraLib/AstraLib.hpp>`, or pull in individual headers as needed.
+
+## Design Philosophy
+Every primitive here made a deliberate tradeoff instead of inheriting a generic default:
+
+- **`Spinlock` / raw atomics vs. `std::mutex`** — for critical sections measured in tens of nanoseconds, a mutex's potential syscall and kernel-level arbitration can cost more than the work it's protecting. `Spinlock` never asks the kernel for anything, trading CPU cycles for latency: its worst case is bounded by how long the lock is actually held, not by scheduler behavior.
+- **`AtomicFutex` vs. spinning** — the opposite tradeoff, used where it actually matters: a thread that might genuinely wait a while (a `ThreadPool` worker with no work queued) shouldn't burn a full core doing it. Futex-based waiting parks the thread with the OS instead, trading a small wake-up latency for not wasting resources when there's truly nothing to do.
+- **`AtomicRingBuffer`** — a ticket-based, lock-free MPMC design built around a specific communication pattern: producers and consumers sharing a fast interconnect, e.g. cores on the same NUMA node. It isn't trying to be a general-purpose queue — it's tuned for that pattern specifically.
+
+These are design intentions, not published benchmark numbers — take them as the reasoning behind the tradeoffs, not as performance claims.
 
 ## Testing
 ```
