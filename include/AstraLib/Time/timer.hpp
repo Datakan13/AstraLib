@@ -36,11 +36,23 @@ public:
         startTime = __rdtscp(&aux);
     }
 
-    void write(const std::string& label = "Timer") {
+    // Returns the number of cycles elapsed since start() was called
+    inline uint64_t getTimeCycles(){
         uint64_t endTime = __rdtscp(&aux);
         __cpuid(0, eax, ebx, ecx, edx);
         uint64_t cycles = endTime - startTime;
+        return cycles;
+    }
 
+    // Returns the number of nanoseconds elapsed since start() was called
+    inline double getTimeNs(){
+        uint64_t cycles = getTimeCycles();
+        double ns = cycles / ghz;       // convert cycles → nanoseconds
+        return ns;
+    }
+
+    void write(const std::string& label = "Timer") {
+        uint64_t cycles = getTimeCycles();
         double ns = cycles / ghz;       // convert cycles → nanoseconds
         double us = ns / 1000.0;        // also microseconds
 
@@ -50,6 +62,8 @@ public:
                   << us << " µs)"
                   << std::endl;
     }
+
+    
 };
 
 } // namespace Time
