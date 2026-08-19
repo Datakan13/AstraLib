@@ -11,8 +11,6 @@
 namespace AstraLib {
 namespace Threading {
 
-constexpr size_t threadCount = 4;
-
 // ─────────────────────────────────────────────
 // Lightweight futex-based gate for thread sleep/wake
 // ─────────────────────────────────────────────
@@ -98,11 +96,13 @@ public:
 // ─────────────────────────────────────────────
 // ThreadPool handles task dispatching to workers
 // ─────────────────────────────────────────────
+template<std::size_t THREAD_COUNT>
 class ThreadPool {
+    static_assert(THREAD_COUNT > 0, "ThreadPool must have at least one thread.");
     std::atomic<int> taskFlag;
     std::thread dispatcherThread;
-    std::array<Worker, threadCount> threads;
-    std::array<std::atomic<int>*, threadCount> threadFlags;
+    std::array<Worker, THREAD_COUNT> threads;
+    std::array<std::atomic<int>*, THREAD_COUNT> threadFlags;
     AstraLib::Buffers::AtomicRingBuffer<std::function<void()>,1024> taskQueue;
     AstraLib::Threading::ThreadGate taskGate;
     
@@ -143,11 +143,11 @@ private:
                     int expected = 0;
                     if (flag->compare_exchange_strong(expected, 1, std::memory_order_acq_rel)) {
                         threads[id].activateWorker(std::move(task));
-                        id = (id + 1) % threadCount;
+                        id = (id + 1) % THREAD_COUNT;
                         assigned = true;
                         break;
                     }
-                    id = (id + 1) % threadCount;
+                    id = (id + 1) % THREAD_COUNT;
                 } while (id != start);
                 if(!assigned){
                     for(;;) {
@@ -156,11 +156,11 @@ private:
                             int expected = 0;
                             if (flag->compare_exchange_strong(expected, 1, std::memory_order_acq_rel)) {
                                 threads[id].activateWorker(std::move(task));
-                                id = (id + 1) % threadCount;
+                                id = (id + 1) % THREAD_COUNT;
                                 assigned = true;
                                 break;
                             }
-                            id = (id + 1) % threadCount;
+                            id = (id + 1) % THREAD_COUNT;
                         } while (id != start);
                         if (assigned) break;
                         _mm_pause();

@@ -12,8 +12,8 @@ template<typename T>
 // seq == ticket write 
 // seq == ticket + 1 read
 struct alignas(64) Slot {
-    static_assert(sizeof(T) <= 64, "Cache line overflow: A too large for ring buffer slot");
     std::atomic<int64_t> seq{0};
+    static_assert(sizeof(T) <= 64 - sizeof(seq), "Cache line overflow: A too large for ring buffer slot");
     T data;
 };
 

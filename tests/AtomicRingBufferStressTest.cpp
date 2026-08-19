@@ -76,8 +76,9 @@
 namespace RB = AstraLib::Buffers;
 static_assert(sizeof(RB::Slot<int>) == 64,  "Slot<int> must be one cache line");
 static_assert(alignof(RB::Slot<int>) == 64, "Slot must be cache-line aligned");
-struct Payload64 { char b[64]; };
-static_assert(sizeof(RB::Slot<Payload64>) == 128, "64B payload => 2-line slot");
+// Slots must fit in a single cache line to avoid false sharing between
+// adjacent slots, so payloads over 56 bytes (64 - sizeof(seq)) are rejected
+// by Slot's own static_assert — there's no valid 2-cache-line layout to test.
 
 // ── thread-safe CHECK machinery ──────────────────────────────────────────────
 static std::atomic<long> g_failures{0};

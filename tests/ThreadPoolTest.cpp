@@ -96,10 +96,16 @@ static bool waitFor(Pred pred, int timeoutSec) {
 
 using AstraLib::Threading::ThreadPool;
 
+// ThreadPool's worker count is now a template parameter (was a hardcoded
+// constexpr) — fixed at 4 here to keep every test's assumptions (e.g. "spread
+// across multiple of the pool's 4 workers" below) unchanged.
+constexpr std::size_t POOL_THREADS = 4;
+using TestPool = ThreadPool<POOL_THREADS>;
+
 // Every test heap-allocates its own pool via this and never frees it — see
 // file header re: bug (1) (destructor hangs) and bug (2) (cross-test
 // contamination from a degraded pool).
-static ThreadPool* freshPool() { return new ThreadPool(); }
+static TestPool* freshPool() { return new TestPool(); }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. Exactly-once execution under load: 20,000 tasks, each flips its own bit
@@ -107,7 +113,7 @@ static ThreadPool* freshPool() { return new ThreadPool(); }
 //    double-execution (bit set twice).
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_exactly_once_execution() {
-    ThreadPool* pool = freshPool();
+    TestPool* pool = freshPool();
     constexpr int N = 20000;
     std::vector<std::atomic<int>> seen(N);
     for (auto& f : seen) f.store(0, std::memory_order_relaxed);
@@ -134,7 +140,7 @@ static void test_exactly_once_execution() {
 //    silently serialized onto a single thread every time).
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_tasks_run_on_multiple_worker_threads() {
-    ThreadPool* pool = freshPool();
+    TestPool* pool = freshPool();
     constexpr int N = 2000;
     std::thread::id mainId = std::this_thread::get_id();
     std::mutex mtx;
@@ -175,7 +181,7 @@ static void test_tasks_run_on_multiple_worker_threads() {
 //    generating 299 more redundant reports.
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_survives_repeated_bursts() {
-    ThreadPool* pool = freshPool();
+    TestPool* pool = freshPool();
     constexpr int BURSTS = 300;
     constexpr int PER_BURST = 500;
 
@@ -196,7 +202,7 @@ static void test_survives_repeated_bursts() {
 //    pool at once.
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_concurrent_producers() {
-    ThreadPool* pool = freshPool();
+    TestPool* pool = freshPool();
     constexpr int PRODUCERS = 8;
     constexpr int PER_PRODUCER = 2000;
     constexpr int TOTAL = PRODUCERS * PER_PRODUCER;
@@ -224,7 +230,7 @@ static void test_concurrent_producers() {
 //    risking UB by abandoning it mid-teardown some other way.
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_destructor_returns_after_use() {
-    ThreadPool* pool = freshPool();
+    TestPool* pool = freshPool();
     std::atomic<bool> ran{false};
     pool->assignTask([&] { ran.store(true, std::memory_order_release); });
     bool taskRan = waitFor([&] { return ran.load(std::memory_order_acquire); }, 10);
@@ -277,7 +283,7 @@ static double cpuTimeSeconds() {
 }
 
 static void test_dispatcher_idle_behavior() {
-    ThreadPool* pool = freshPool();
+    TestPool* pool = freshPool();
     std::atomic<bool> ran{false};
     pool->assignTask([&] { ran.store(true, std::memory_order_release); });   // warm it up
     bool taskRan = waitFor([&] { return ran.load(std::memory_order_acquire); }, 10);
