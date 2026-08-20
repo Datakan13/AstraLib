@@ -32,3 +32,8 @@ if(BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
+
+option(BUILD_DEMO "Build AstraLib demos" ON)
+if(BUILD_DEMO) 
+    add_subdirectory(demo)
+endif()
