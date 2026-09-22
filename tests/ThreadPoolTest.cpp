@@ -312,8 +312,6 @@ static void test_dispatcher_idle_behavior() {
 int main() {
     std::cout << "ThreadPool test suite  (hw threads: "
               << std::thread::hardware_concurrency() << ")\n" << std::endl;
-    std::cout << "NOTE: no pool created here is ever cleanly destroyed — see file header. "
-                 "Process exit (not a destructor) is what reclaims them all." << std::endl;
 
     struct { const char* name; void (*fn)(); } tests[] = {
         {"exactly_once_execution",               test_exactly_once_execution},
