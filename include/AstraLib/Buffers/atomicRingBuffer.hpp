@@ -103,15 +103,22 @@ class AtomicRingBuffer {
     // If count is bigger than BATCH_SIZE, it will be reduced to BATCH_SIZE.
     std::array<A,BATCH_SIZE>* batchDequeue(int count) {
         if(count > BATCH_SIZE) count = BATCH_SIZE;
+        uint64_t ticket = readTicket.value.fetch_add(count,std::memory_order_acq_rel);
         for(int i = 0; i< count; i++) {
-            uint64_t ticket = readTicket.value.fetch_add(1,std::memory_order_acq_rel);
             int index = ticket & (SIZE - 1);
-            while(buffer[index].seq.load(std::memory_order_acquire) != ticket + 1) {
-                _mm_pause();
+            if(buffer[index].seq.load(std::memory_order_acquire) != ticket + 1) {
+                while(i<count){
+                    index = ticket & (SIZE-1);
+                    buffer[index].seq.store(ticket+SIZE,std::memory_order_release);
+                    ticket++;
+                    i++;
+                }
+                return &batchDequeueArray;
             }
             batchDequeueArray[i] = std::move(buffer[index].data);
             // SIZE is capacity thus +SIZE for the next iteration
             buffer[index].seq.store(ticket+SIZE,std::memory_order_release);
+            ticket++;
         }
         return &batchDequeueArray;
     }
