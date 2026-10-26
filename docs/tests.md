@@ -409,6 +409,64 @@ Bugs found by these tests so far, in order of severity:
    of `count` tickets with a single `fetch_add` rather than one per item —
    which is what the `BufferBatchRework` branch is doing.
 
+11. **Not a bug — slot size is a per-queue measurement, not a rule.** The two
+   ring buffers settled on *different* slot alignments, both by measurement:
+   `AtomicRingBuffer` uses 64 bytes (finding 10's table: 128 was never
+   faster) and `spscRingBuffer` uses 128. The same-run A/B for
+   `spscRingBuffer` (three builds of one commit differing only in
+   `spscSlot`'s `alignas`, 1024-slot ring, 12 rotating rounds on each of two
+   pinned core pairs; ns/item, lower is better):
+
+   | Shape | 64 B | 128 B | 256 B |
+   |---|---|---|---|
+   | 8-byte stream, cpu0 → cpu2 | 5.44 | 4.54 | 4.41 |
+   | 8-byte stream, cpu8 → cpu10 | 5.42 | 4.44 | 4.38 |
+   | 56-byte stream, cpu0 → cpu2 | 6.56 | 6.14 | 5.57 |
+   | 56-byte stream, cpu8 → cpu10 | 6.76 | 5.86 | 5.52 |
+   | Ping-pong p50 (cycles), the two pairs | 403 / 420 | 410 / 394 | 355 / 367 |
+
+   128 beats 64 by ~18% on 8-byte items, with no overlap between the two
+   sizes' per-round ranges on either core pair. 256 is a little faster again
+   (~3% at 8 bytes, ~10% at 56) but its ranges overlap 128's and it doubles
+   the ring's memory, so 128 stays. Ping-pong is bimodal (~200-500 cycles at
+   every size) and doesn't rank the sizes.
+
+   **Why slot size matters at all.** The claim/publish code runs the same
+   instructions at every slot size. What slot size changes is which cache
+   lines each core touches, and moving a line between cores (tens of ns) is
+   the dominant per-item cost in both designs — far more than the
+   instructions. So layout can matter even though the logic doesn't change.
+
+   **Why the two queues could disagree — candidate explanations, NOT
+   verified:**
+   * Intel's adjacent-line prefetcher fetches aligned 128-byte pairs. With
+     64-byte slots, slots *i* and *i+1* share a pair, so the consumer reading
+     *i* may also pull *i+1*. That helps if the producer already wrote *i+1*
+     (a free early fetch) and hurts if it is still writing it (the line
+     bounces back). With 128-byte slots the interaction disappears both
+     ways. Which case dominates depends on how far ahead the producer runs,
+     and that emerges from each design's per-side cost (shared ticket
+     `fetch_add` vs a private cursor) — so the same slot size can land the
+     two queues in opposite regimes.
+   * That doesn't explain everything: it predicts 128 ≈ 256, which holds for
+     `spscRingBuffer` but not `AtomicRingBuffer` (128 was ~60% slower on the
+     drain, 64 and 256 fine). Something specific to 128 is involved there.
+     One candidate: with 128-byte slots, slots 32 apart are exactly 4 KB
+     apart, which can trigger the CPU's 4K-aliasing false dependency between
+     loads and stores.
+
+   Experiments that would decide it: sample ring occupancy
+   (`writeTicket - readTicket`, or the SPSC cursor gap) during the drain at
+   each slot size — the prefetch explanation predicts the two queues run at
+   different fill levels; and change the ring size or base alignment to move
+   the 4 KB pattern. Hardware counters or prefetcher control would settle it
+   directly but aren't available under WSL2.
+
+   **Practical rule:** don't change either alignment to "match" the other,
+   and don't change either without rerunning this A/B — the layout
+   `static_assert`s in the stress and SPSC tests pin each choice. Results
+   are from one hybrid laptop CPU; a different microarchitecture may differ.
+
 These are left for deliberate fixes rather than patched inside the test
 files — the tests exist to locate and explain them precisely, not to paper
 over them.

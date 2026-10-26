@@ -45,6 +45,8 @@
 namespace B = AstraLib::Buffers;
 
 // ── layout expectations ─────────────────────────────────────────────────────
+// 128, not AtomicRingBuffer's 64, on purpose: measured ~18% faster than 64
+// for this queue (docs/tests.md, finding 11). Re-measure before changing.
 static_assert(sizeof(B::spscSlot<int>) == 128,  "spscSlot<int> should be padded to 128B");
 static_assert(alignof(B::spscSlot<int>) == 128, "spscSlot should be 128-byte aligned");
 
