@@ -33,6 +33,14 @@ if(BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 
+# Head-to-head benchmarks against other libraries. OFF by default: turning it
+# on downloads the (header-only) competitors and requires Boost headers.
+option(BUILD_COMPARISON_BENCH "Build comparison benchmarks vs other libraries" OFF)
+if(BUILD_COMPARISON_BENCH)
+    enable_testing()
+    add_subdirectory(bench)
+endif()
+
 option(BUILD_DEMO "Build AstraLib demos" ON)
 if(BUILD_DEMO) 
     add_subdirectory(demo)

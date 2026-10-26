@@ -45,6 +45,10 @@ Sanitizer builds:
 cmake -S . -B build-tsan -DENABLE_TSAN=ON   # data races
 cmake -S . -B build-asan -DENABLE_ASAN=ON   # memory errors + UB
 ```
+Comparison benchmarks against other libraries (downloads header-only competitors, needs Boost):
+```
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_COMPARISON_BENCH=ON
+```
 See [docs/tests.md](docs/tests.md) for full test coverage and known findings.
 
 ## Notes 

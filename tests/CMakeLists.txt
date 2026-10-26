@@ -34,3 +34,20 @@ astra_test(AtomicRingBufferTest)
 # internal watchdog that turns queue deadlocks into diagnosed failures.
 astra_test(AtomicRingBufferStressTest)
 set_tests_properties(AtomicRingBufferStressTest PROPERTIES TIMEOUT 900)
+
+# Benchmark, not a pass/fail test: it reports a table of numbers and asserts
+# only on item accounting plus an absurd structural floor. Absolute
+# throughput is deliberately NOT gated — the hosted CI runner's variance
+# would generate far more false failures than real regressions caught, and
+# several configurations are genuinely bimodal even on a quiet dev machine
+# (see the file header on ring-occupancy regimes).
+#
+# Labelled `perf` and excluded from the default run via `ctest -LE perf`
+# (see .github/workflows/ci.yml). Run it deliberately:
+#     ctest --test-dir build -L perf --output-on-failure
+# It also needs >= 2 PHYSICAL cores and reports SKIPPED below that; a 2-vCPU
+# runner is typically one physical core with SMT, so it would skip there
+# anyway.
+astra_test(AtomicRingBufferPerformanceTest)
+set_tests_properties(AtomicRingBufferPerformanceTest PROPERTIES
+                     TIMEOUT 900 LABELS perf)

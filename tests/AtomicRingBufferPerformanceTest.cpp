@@ -129,7 +129,7 @@
 // batchDequeue() is mid-rework (claiming the whole batch with one
 // readTicket.fetch_add instead of one per item). Section [4] is excluded
 // until that lands. Flip to 0 to bring it back.
-#define ASTRA_SKIP_BATCH_DEQUEUE_TESTS 1
+#define ASTRA_SKIP_BATCH_DEQUEUE_TESTS 0
 
 #include <AstraLib/Buffers/atomicRingBuffer.hpp>
 #include <AstraLib/Time/timer.hpp>

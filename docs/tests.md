@@ -82,6 +82,122 @@ fast (0.11s/0.01s/0.06s) rather than hitting their old deadlines — the
 | `DebugFuncTest.cpp` | Output content/markers, variadic edge counts, concurrent-call smoke test, concurrent padding-correctness regression |
 | `AtomicRingBufferTest.cpp` | Basic functional coverage: `isEmpty()` (incl. during an in-flight, unpublished enqueue), `enqueue(const A&)` copy semantics, `emplaceEnqueue`'s trivially-destructible branch, non-default `BATCH_SIZE`, `batchDequeue` count-clamping regression |
 | `AtomicRingBufferStressTest.cpp` | Adversarial MPMC suite: exactly-once accounting, torn-write detection, lifetime canaries, oversubscription, `batchDequeue`. Has its own watchdog thread that turns queue deadlocks into diagnosed failures. |
+| `AtomicRingBufferPerformanceTest.cpp` | Benchmark, not pass/fail (label `perf`, excluded from the default run): SPSC ceiling, MPMC scaling, handoff latency percentiles, `batchDequeue` vs `dequeue`, payload size. See "Benchmarking" below. |
+
+## Benchmarking
+
+`AtomicRingBufferPerformanceTest` is a benchmark, not a test. It reports a
+table and asserts only that the work really happened (exact item accounting,
+plus a structural-failure floor of 100k ops/s). It carries the ctest label
+`perf` and is excluded from the default run, so `ctest` and CI use
+`-LE perf`. Run it deliberately:
+
+```
+ctest --test-dir build -L perf --output-on-failure
+ASTRA_PERF_VERBOSE=1 ./build/tests/AtomicRingBufferPerformanceTest  # per-rep numbers
+```
+
+Absolute throughput is deliberately **not** gated. The hosted runner's
+variance would produce far more false failures than regressions caught, and
+some configurations are bimodal even on a quiet 20-core dev machine (see
+below). The test also needs at least 2 *physical* cores and prints SKIPPED
+below that — a 2-vCPU runner is typically one physical core plus SMT.
+
+Methodology (the parts that turned out to matter, each learned the hard way
+while writing it):
+
+* **Pin one thread per PHYSICAL core, not per hardware thread — but know
+  what that buys you here.** cpu0 and cpu1 are SMT siblings of one core
+  (`topology/thread_siblings_list` reports `0-1` for both), so the obvious
+  pinning put a producer and consumer spinning on `_mm_pause` against each
+  other inside a single core; fixing that removed a large error. But on this
+  host the topology sysfs reports is **synthetic** and the guest vCPU -> host
+  core mapping is not fixed — so pinning removes migration and sibling
+  collisions, but does not pin you to a known piece of silicon. See finding 9
+  for what that does and does not explain.
+* **Don't compare `__rdtsc()` across cores.** Measuring one-way latency by
+  stamping in the producer and subtracting in the consumer reported a max of
+  6.8e18 ns — an unsigned wrap of a *negative* interval. Per-core TSCs are
+  synchronized only to within an offset even with `constant_tsc`/
+  `nonstop_tsc`, and `rdtsc` doesn't serialize. Discarding the negative
+  samples would have been worse than the visible break: the skew biases every
+  sample, so the survivors would be quietly wrong. Replaced with a ping-pong
+  round trip where one pinned thread takes both timestamps.
+* **Report the range, not just the median.** See finding 9.
+* Timer is used only for aggregate runs, where its ~24k-44k-cycle `__cpuid`
+  overhead (see `TimerTest.cpp`'s header) amortizes away, and it is
+  cross-checked against `steady_clock` at startup — if its GHz calibration
+  were off, every Timer-derived figure would be scaled by the same factor
+  silently. Measured ratio: 0.9995.
+
+Representative numbers, 20-core WSL2 dev machine, `-O3`, median of 15 runs:
+
+| Measurement | Result |
+|---|---|
+| SPSC 1P/1C | ~27-130 M ops/s (bimodal — environment, see finding 9) |
+| MPMC 2P/2C | ~33 M ops/s (~29 ns/op) |
+| MPMC 4P/4C | ~30 M ops/s (~33 ns/op) |
+| Handoff latency | p50 139 ns round trip / ~70 ns one-way; p99.9 ~234 ns |
+| `batchDequeue(50)` vs `dequeue()` | 0.91x — batching is *slower*, see finding 10 |
+| Payload 4B / 56B / 120B | ~95 / ~49 / ~23 M ops/s |
+
+### Comparison benchmarks (`bench/`)
+
+Head-to-head runs of AstraLib against established libraries, one binary per
+component. They live outside `tests/` behind a CMake option that is **OFF by
+default**, because turning it on downloads the competitors (header-only,
+pinned by SHA256 in `bench/CMakeLists.txt`) and needs Boost headers:
+
+```
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_COMPARISON_BENCH=ON
+cmake --build build -j
+./build/bench/QueueComparisonBench        # also Spinlock-, ThreadPool-, IndexPool-
+ctest --test-dir build -L comparison -V   # or all four through ctest
+```
+
+They're labelled `perf;comparison`, so `ctest -LE perf` still skips them.
+Knobs: `ASTRA_BENCH_SCALE`, `ASTRA_BENCH_MULT`, `ASTRA_BENCH_REPS` (default 7),
+`ASTRA_BENCH_VERBOSE`.
+
+| Binary | AstraLib component | Competitors |
+|---|---|---|
+| `QueueComparisonBench` | `AtomicRingBuffer` | rigtorp::MPMCQueue, boost::lockfree::queue, moodycamel::ConcurrentQueue, mutex+deque; SPSC-only in 1P/1C: rigtorp::SPSCQueue, moodycamel::ReaderWriterQueue, boost::lockfree::spsc_queue |
+| `SpinlockComparisonBench` | `Spinlock` (default and `waitTime=16`) | TTAS spinlock, `pthread_spin_lock`, `std::mutex` |
+| `ThreadPoolComparisonBench` | `ThreadPool<W>` | BS::thread_pool v5, textbook mutex+condvar pool |
+| `IndexPoolComparisonBench` | `ThreadSafeIndexPool` | rigtorp::MPMCQueue, boost::lockfree::stack, moodycamel::ConcurrentQueue, mutex+vector |
+
+Same methodology as `AtomicRingBufferPerformanceTest`: one thread per
+physical core, configurations that don't fit are skipped, median + range
+of the reps. One addition: competitors are **interleaved per rep**
+(A B C A B C …) so sustained-load frequency decay doesn't favour whichever
+library runs first. Each table has a "vs Astra" column; read that rather than
+comparing absolute numbers across separate runs. Each benchmark also checks
+its own accounting: queue value sums, a plain counter inside the lock, and
+per-index plain counters for the pools. An adapter that loses or duplicates
+work fails the run instead of posting a flattering number.
+
+Headline results, 2026-10-26, same dev machine, `-O3`, median of 7:
+
+| Comparison | Result |
+|---|---|
+| Queue, MPMC shapes | AtomicRingBuffer 1.07-1.16x rigtorp::MPMCQueue (same design) at 2P/2C, 4P/4C, 4P/1C, 1P/4C; ~2x moodycamel; 7-10x boost::lockfree::queue |
+| Queue, 4P/1C | moodycamel::ConcurrentQueue 1.17x faster (per-producer sub-queues suit MPSC; it's unbounded and not FIFO) |
+| Queue, 1P/1C | rigtorp::SPSCQueue and moodycamel::ReaderWriterQueue ~2x faster, as expected — they skip the shared ticket RMW; boost::lockfree::spsc_queue on par |
+| Queue latency | best p50 (131 ns) and p99.9 (228 ns) round trip of all eight |
+| Spinlock throughput | highest at every contended point (2.5-5.3x TTAS/pthread at 8 threads)… |
+| Spinlock **handoffs** | …but it hands the lock to another thread 10-1000x less often (0.01-0.28 M/s vs 0.6-14 M/s). The 1000-pause backoff lets the holder re-acquire over and over, so waiters can sit for ~100 µs. `waitTime=16` gives up to ~55% of the throughput in exchange for much more frequent handoffs |
+| ThreadPool burst | flat ~0.11-0.21 M tasks/s regardless of worker count or task size, i.e. ~5-9 µs per task (one unstable 2-worker row reached 0.36). With ~1 µs tasks at 2-4 workers, BS::thread_pool is 7-17x faster and the condvar pool 8-10x |
+| ThreadPool wake latency | p50 ~27 µs vs ~13-14 µs for both competitors (idle pool → task start) |
+| IndexPool | 1.02-1.14x rigtorp::MPMCQueue at 2-8 threads (same ring underneath), 1.7x it uncontended; 2.6-8x boost::lockfree::stack under contention |
+
+Caveats specific to these numbers:
+* Thread-pool workers are created inside each library and can't be pinned, so
+  that table is noisier than the others. Both competitors also slowed sharply
+  at 8 workers on this box (BS::thread_pool: ~1.5-2 → 0.05 M tasks/s). That
+  hasn't been investigated, so don't read the 8-worker rows as a ranking.
+* The TTAS/pthread near-zero fairness (0.02-0.10) at 8 threads with the long
+  critical section is real starvation: some threads got almost no
+  acquisitions in 200 ms. In an earlier run one thread got none at all.
 
 ## Known findings
 
@@ -188,6 +304,79 @@ Bugs found by these tests so far, in order of severity:
    are fine with headroom but catastrophic (~10,000x, not proportional) once
    threads outnumber real cores. See "Automatic scaling on small machines"
    above for the fix and its verification limits.
+
+9. **Not a bug. Cause UNIDENTIFIED — read this entry as a list of what has
+   been ruled out.** With 1-2 threads, throughput is bimodal by ~5x
+   (identical 1P/1C reps: 26.8, 39.3, 135.2, 98.2, 113.8, 119.4, 132.2,
+   47.7, 58.1 M ops/s). Two successive explanations were written into this
+   file as established and **both were wrong**; they are recorded here so the
+   same ground is not re-covered:
+
+   * ~~Ring occupancy~~ (`ticket & (SIZE-1)` making write index == read index
+     when full/empty). Never tested before being asserted. Still untested —
+     isolating it needs occupancy varied while placement is held constant.
+   * ~~Heterogeneous P/E cores behind WSL2's synthetic topology.~~ Plausible
+     (the part really is 6 P + 8 E, and sysfs really does report a fake
+     uniform 10x2), and supported by two pinned pair sweeps showing a stable
+     6-8x spread. **It did not survive a controlled test.** Both sweeps
+     measured pairs in ascending order, so "early" and "low cpu id" were
+     confounded. Running the sweep in reverse:
+
+     ```
+     forward:  cpu0+2 42.6   cpu4+6 86.5   cpu8+10 107.4  cpu16+18 104.4
+     reverse:  cpu0+2 96.0   cpu4+6 50.7   cpu8+10 122.1  cpu16+18  85.2
+     ```
+
+     The slow spot moves; it does not track cpu id.
+
+   **What the probes positively establish** (both are built into the
+   benchmark and printed every run):
+
+   * Single-thread speed across the ten cores varies by only **1.09x** — they
+     are near-uniform on scalar work.
+   * Pairwise ping-pong handoff cost varies by only **1.46x** (228-334
+     cycles, 85-124 ns).
+
+   Neither can produce a 5x throughput swing, and ordering cores by either
+   metric did not reduce the bimodality at all. The benchmark therefore
+   measures both, reports them, and **only reorders cores when the pairwise
+   spread exceeds 1.5x** — acting on a 1.46x spread whose ranking does not
+   reproduce would be fitting noise.
+
+   **Separately verified and real: sustained-load frequency decay.** A
+   fixed-work canary on an otherwise idle core (SMT sibling deliberately left
+   idle, so not sibling contention) cost 34.9M TSC cycles cold, 56.7M after
+   10s of all-core load, 73.6M after 60s, ~9% unrecovered immediately after.
+   The benchmark now re-probes at the end and prints the drift (typically
+   ~1.1x over a default run). This is why longer runs are not automatically
+   better: `ASTRA_PERF_MULT=25` pushes later reps deep into decay.
+
+   **Remaining candidates, untested:** hypervisor vCPU scheduling (Hyper-V's
+   root scheduler descheduling a vCPU mid-run), turbo/frequency transitions,
+   and the original occupancy hypothesis. Distinguishing them needs a bare-
+   metal Linux host, which would remove the largest confound outright.
+
+   **Practical guidance, which does not depend on knowing the cause:** trust
+   cross-configuration comparisons *within* one run; treat absolute numbers
+   *across* runs as soft. Rows that stay tight (4P/4C, 120-byte payloads) are
+   the trustworthy ones — more threads average over whatever this is. This
+   was corroborated accidentally: a run contending with unrelated CPU load
+   collapsed the 1-2 thread rows ~5x while 4P/4C moved 30.2 -> 30.9 and
+   120-byte payloads 23.7 -> 24.4.
+
+10. **Not a bug — but `batchDequeue()`'s premise doesn't hold.** It measures
+   **0.91x, i.e. slower** than the same number of `dequeue()` calls. Reading
+   the implementation confirms why, independently of the measurement: its
+   loop body does exactly the same per-item work as `dequeue()` — one
+   `readTicket.fetch_add`, one seq spin, one move, one seq store — and then
+   additionally stages each item into `batchDequeueArray`. It amortizes
+   nothing; it adds a copy. Worth knowing because the method's cost is an
+   MPSC-only usage restriction, paid for a speedup that isn't there. (An
+   earlier measurement showing batching 1.66x *faster* was an artifact of the
+   SMT mispinning described under "Benchmarking" — the corrected measurement
+   and the source reading now agree.) Left alone per the convention below;
+   the fix, if wanted, is to claim a run of `count` tickets with a single
+   `fetch_add` rather than one per item.
 
 These are left for deliberate fixes rather than patched inside the test
 files — the tests exist to locate and explain them precisely, not to paper
