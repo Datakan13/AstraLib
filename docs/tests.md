@@ -82,6 +82,7 @@ fast (0.11s/0.01s/0.06s) rather than hitting their old deadlines — the
 | `DebugFuncTest.cpp` | Output content/markers, variadic edge counts, concurrent-call smoke test, concurrent padding-correctness regression |
 | `AtomicRingBufferTest.cpp` | Basic functional coverage: `isEmpty()` (incl. during an in-flight, unpublished enqueue), `enqueue(const A&)` copy semantics, `emplaceEnqueue`'s trivially-destructible branch, non-default `BATCH_SIZE`, `batchDequeue` count-clamping regression |
 | `AtomicRingBufferStressTest.cpp` | Adversarial MPMC suite: exactly-once accounting, torn-write detection, lifetime canaries, oversubscription, `batchDequeue`. Has its own watchdog thread that turns queue deadlocks into diagnosed failures. |
+| `SpscRingBufferTest.cpp` | `spscRingBuffer`: single-threaded FIFO across wraparound, exact capacity (full ring blocks the producer without overwriting; empty ring blocks the consumer), SIZE 1/2/3 lockstep, 5M-item strict-FIFO stream, torn-payload detection at 120B and 256B, lifetime canaries through both `enqueue` and `emplaceEnqueue`, `unique_ptr` ownership, ping-pong. Own watchdog. Verified by planting the bugs from earlier drafts (`==` for `=`, relaxed publish) and three others; every one is caught (relaxed ordering only under TSan). |
 | `AtomicRingBufferPerformanceTest.cpp` | Benchmark, not pass/fail (label `perf`, excluded from the default run): SPSC ceiling, MPMC scaling, handoff latency percentiles, `batchDequeue` vs `dequeue`, payload size. See "Benchmarking" below. |
 
 ## Benchmarking
@@ -161,7 +162,7 @@ Knobs: `ASTRA_BENCH_SCALE`, `ASTRA_BENCH_MULT`, `ASTRA_BENCH_REPS` (default 7),
 
 | Binary | AstraLib component | Competitors |
 |---|---|---|
-| `QueueComparisonBench` | `AtomicRingBuffer` | rigtorp::MPMCQueue, boost::lockfree::queue, moodycamel::ConcurrentQueue, mutex+deque; SPSC-only in 1P/1C: rigtorp::SPSCQueue, moodycamel::ReaderWriterQueue, boost::lockfree::spsc_queue |
+| `QueueComparisonBench` | `AtomicRingBuffer`, `spscRingBuffer` (1P/1C only) | rigtorp::MPMCQueue, boost::lockfree::queue, moodycamel::ConcurrentQueue, mutex+deque; SPSC-only in 1P/1C: rigtorp::SPSCQueue, moodycamel::ReaderWriterQueue, boost::lockfree::spsc_queue |
 | `SpinlockComparisonBench` | `Spinlock` (default and `waitTime=16`) | TTAS spinlock, `pthread_spin_lock`, `std::mutex` |
 | `ThreadPoolComparisonBench` | `ThreadPool<W>` | BS::thread_pool v5, textbook mutex+condvar pool |
 | `IndexPoolComparisonBench` | `ThreadSafeIndexPool` | rigtorp::MPMCQueue, boost::lockfree::stack, moodycamel::ConcurrentQueue, mutex+vector |
@@ -183,6 +184,7 @@ Headline results, 2026-10-26, same dev machine, `-O3`, median of 7:
 | Queue, MPMC shapes | AtomicRingBuffer 1.07-1.16x rigtorp::MPMCQueue (same design) at 2P/2C, 4P/4C, 4P/1C, 1P/4C; ~2x moodycamel; 7-10x boost::lockfree::queue |
 | Queue, 4P/1C | moodycamel::ConcurrentQueue 1.17x faster (per-producer sub-queues suit MPSC; it's unbounded and not FIFO) |
 | Queue, 1P/1C | rigtorp::SPSCQueue and moodycamel::ReaderWriterQueue ~2x faster, as expected — they skip the shared ticket RMW; boost::lockfree::spsc_queue on par |
+| `spscRingBuffer`, 1P/1C | 191 M ops/s median (range 179-203) — highest median of the four SPSC queues and the tightest range; moodycamel::ReaderWriterQueue 180 (132-279), rigtorp::SPSCQueue 128 (84-228), boost::lockfree::spsc_queue 103 (62-151). Ping-pong p50 126 ns, lowest of all nine queues |
 | Queue latency | best p50 (131 ns) and p99.9 (228 ns) round trip of all eight |
 | Spinlock throughput | highest at every contended point (2.5-5.3x TTAS/pthread at 8 threads)… |
 | Spinlock **handoffs** | …but it hands the lock to another thread 10-1000x less often (0.01-0.28 M/s vs 0.6-14 M/s). The 1000-pause backoff lets the holder re-acquire over and over, so waiters can sit for ~100 µs. `waitTime=16` gives up to ~55% of the throughput in exchange for much more frequent handoffs |

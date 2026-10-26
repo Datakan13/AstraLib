@@ -17,14 +17,15 @@
 //                                 a lock-free library.
 //
 //   SPSC-only (run in the 1P/1C configuration only)
+//     AstraLib spscRingBuffer     per-slot ready flag, private cursors
 //     rigtorp::SPSCQueue
 //     moodycamel::ReaderWriterQueue
 //     boost::lockfree::spsc_queue
 //
-// Every bounded queue gets the same capacity (CAP). AtomicRingBuffer and
-// rigtorp::MPMCQueue block natively; everything else is wrapped in a
-// try-op + _mm_pause retry loop, which is how you'd use them as a blocking
-// handoff.
+// Every bounded queue gets the same capacity (CAP). AtomicRingBuffer,
+// spscRingBuffer and rigtorp::MPMCQueue block natively; everything else is
+// wrapped in a try-op + _mm_pause retry loop, which is how you'd use them as
+// a blocking handoff.
 //
 // Sections:
 //   [1] throughput across producer/consumer shapes (fixed total items)
@@ -37,6 +38,7 @@
 #include "benchCommon.hpp"
 
 #include <AstraLib/Buffers/atomicRingBuffer.hpp>
+#include <AstraLib/Buffers/spscRingBuffer.hpp>
 
 #include <boost/lockfree/queue.hpp>
 #include <boost/lockfree/spsc_queue.hpp>
@@ -99,6 +101,12 @@ struct MutexDeque {
             _mm_pause();
         }
     }
+};
+
+struct AstraSPSC {
+    AstraLib::Buffers::spscRingBuffer<uint64_t, CAP> q;
+    void push(uint64_t v) { q.enqueue(std::move(v)); }
+    uint64_t pop() { return q.dequeue(); }
 };
 
 struct RigtorpSPSC {
@@ -193,6 +201,7 @@ int main() {
         make<BoostQueue> ("boost::lockfree::queue",      "", false),
         make<MoodyCQ>    ("moodycamel::ConcurrentQueue", "(unbounded, not FIFO)", false),
         make<MutexDeque> ("std::mutex + std::deque",     "", false),
+        make<AstraSPSC>  ("AstraLib spscRingBuffer",     "(SPSC only)", true),
         make<RigtorpSPSC>("rigtorp::SPSCQueue",          "(SPSC only)", true),
         make<MoodyRWQ>   ("moodycamel::ReaderWriterQ",   "(SPSC only)", true),
         make<BoostSPSC>  ("boost::lockfree::spsc_queue", "(SPSC only)", true),

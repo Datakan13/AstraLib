@@ -35,6 +35,12 @@ astra_test(AtomicRingBufferTest)
 astra_test(AtomicRingBufferStressTest)
 set_tests_properties(AtomicRingBufferStressTest PROPERTIES TIMEOUT 900)
 
+# SPSC ring: functional + two-thread stress (FIFO order, full/empty blocking,
+# torn payloads, emplaceEnqueue lifetimes). Only ever two threads, so it needs
+# no scaling on small CI runners. Internal watchdog like the suite above.
+astra_test(SpscRingBufferTest)
+set_tests_properties(SpscRingBufferTest PROPERTIES TIMEOUT 300)
+
 # Benchmark, not a pass/fail test: it reports a table of numbers and asserts
 # only on item accounting plus an absurd structural floor. Absolute
 # throughput is deliberately NOT gated — the hosted CI runner's variance
