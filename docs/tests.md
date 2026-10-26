@@ -133,17 +133,16 @@ while writing it):
   were off, every Timer-derived figure would be scaled by the same factor
   silently. Measured ratio: 0.9995.
 
-Representative numbers, 20-core WSL2 dev machine, `-O3`, median of 15 runs,
-128-byte slots (2026-10-26):
+Representative numbers, 20-core WSL2 dev machine, `-O3`, median of 15 runs:
 
 | Measurement | Result |
 |---|---|
-| SPSC 1P/1C | ~61 M ops/s median, range 35-96 (bimodal — environment, see finding 9) |
-| MPMC 2P/2C | ~32 M ops/s (~32 ns/op) |
-| MPMC 4P/4C | ~30 M ops/s (~34 ns/op) |
-| Handoff latency | p50 164 ns round trip / ~82 ns one-way; p99.9 ~258 ns |
-| `batchDequeue(50)` vs `dequeue()` | 1.05-1.43x *faster* across four runs (all UNSTABLE) — see finding 10 |
-| Payload 4B / 56B / 120B | ~59 / ~29 / ~22 M ops/s (every slot is 128 B, so this is copy cost only) |
+| SPSC 1P/1C | ~27-130 M ops/s (bimodal — environment, see finding 9) |
+| MPMC 2P/2C | ~33 M ops/s (~29 ns/op) |
+| MPMC 4P/4C | ~30 M ops/s (~33 ns/op) |
+| Handoff latency | p50 139 ns round trip / ~70 ns one-way; p99.9 ~234 ns |
+| `batchDequeue(50)` vs `dequeue()` | 0.85-1.03x across measurements — no gain, see finding 10 |
+| Payload 4B / 56B / 120B | ~95 / ~49 / ~23 M ops/s |
 
 ### Comparison benchmarks (`bench/`)
 
@@ -180,22 +179,20 @@ its own accounting: queue value sums, a plain counter inside the lock, and
 per-index plain counters for the pools. An adapter that loses or duplicates
 work fails the run instead of posting a flattering number.
 
-Headline results, 2026-10-26, same dev machine, `-O3`, median of 7, 128-byte
-`AtomicRingBuffer` slots (spinlock rows from an earlier run the same day; the
-spinlock doesn't use the ring buffer):
+Headline results, 2026-10-26, same dev machine, `-O3`, median of 7:
 
 | Comparison | Result |
 |---|---|
-| Queue, MPMC shapes | AtomicRingBuffer 1.04-1.18x rigtorp::MPMCQueue (same design) at 2P/2C, 4P/4C, 4P/1C, 1P/4C; ~2x moodycamel; 6-10x boost::lockfree::queue |
-| Queue, 4P/1C | moodycamel::ConcurrentQueue 1.21x faster (per-producer sub-queues suit MPSC; it's unbounded and not FIFO) |
-| Queue, 1P/1C | rigtorp::SPSCQueue and moodycamel::ReaderWriterQueue ~2x faster than AtomicRingBuffer, as expected — they skip the shared ticket RMW; boost::lockfree::spsc_queue 1.1x |
-| `spscRingBuffer`, 1P/1C | 202 M ops/s median (range 194-214) — highest median of the four SPSC queues and the tightest range; rigtorp::SPSCQueue 183 (103-507), moodycamel::ReaderWriterQueue 175 (138-237), boost::lockfree::spsc_queue 96 (81-152) |
-| Queue latency | AtomicRingBuffer and spscRingBuffer tie for the lowest p50 round trip of all nine queues (132 ns); AtomicRingBuffer has the lowest p99.9 (241 ns) |
+| Queue, MPMC shapes | AtomicRingBuffer 1.07-1.16x rigtorp::MPMCQueue (same design) at 2P/2C, 4P/4C, 4P/1C, 1P/4C; ~2x moodycamel; 7-10x boost::lockfree::queue |
+| Queue, 4P/1C | moodycamel::ConcurrentQueue 1.17x faster (per-producer sub-queues suit MPSC; it's unbounded and not FIFO) |
+| Queue, 1P/1C | rigtorp::SPSCQueue and moodycamel::ReaderWriterQueue ~2x faster, as expected — they skip the shared ticket RMW; boost::lockfree::spsc_queue on par |
+| `spscRingBuffer`, 1P/1C | 191 M ops/s median (range 179-203) — highest median of the four SPSC queues and the tightest range; moodycamel::ReaderWriterQueue 180 (132-279), rigtorp::SPSCQueue 128 (84-228), boost::lockfree::spsc_queue 103 (62-151). Ping-pong p50 126 ns, lowest of all nine queues |
+| Queue latency | best p50 (131 ns) and p99.9 (228 ns) round trip of all eight |
 | Spinlock throughput | highest at every contended point (2.5-5.3x TTAS/pthread at 8 threads)… |
 | Spinlock **handoffs** | …but it hands the lock to another thread 10-1000x less often (0.01-0.28 M/s vs 0.6-14 M/s). The 1000-pause backoff lets the holder re-acquire over and over, so waiters can sit for ~100 µs. `waitTime=16` gives up to ~55% of the throughput in exchange for much more frequent handoffs |
-| ThreadPool burst | flat ~0.11-0.16 M tasks/s regardless of worker count or task size, i.e. ~6-9 µs per task. With ~1 µs tasks at 2-4 workers, BS::thread_pool is ~10-17x faster and the condvar pool 10-14x |
-| ThreadPool wake latency | p50 ~34 µs vs ~19-20 µs for both competitors (idle pool → task start); absolute values vary by run, the ~1.7-2x ratio has held |
-| IndexPool | 0.98-1.12x rigtorp::MPMCQueue at 2-8 threads (same ring underneath), 1.7x it uncontended; 2.9-8.5x boost::lockfree::stack under contention |
+| ThreadPool burst | flat ~0.11-0.21 M tasks/s regardless of worker count or task size, i.e. ~5-9 µs per task (one unstable 2-worker row reached 0.36). With ~1 µs tasks at 2-4 workers, BS::thread_pool is 7-17x faster and the condvar pool 8-10x |
+| ThreadPool wake latency | p50 ~27 µs vs ~13-14 µs for both competitors (idle pool → task start) |
+| IndexPool | 1.02-1.14x rigtorp::MPMCQueue at 2-8 threads (same ring underneath), 1.7x it uncontended; 2.6-8x boost::lockfree::stack under contention |
 
 Caveats specific to these numbers:
 * Thread-pool workers are created inside each library and can't be pinned, so
@@ -371,26 +368,46 @@ Bugs found by these tests so far, in order of severity:
    collapsed the 1-2 thread rows ~5x while 4P/4C moved 30.2 -> 30.9 and
    120-byte payloads 23.7 -> 24.4.
 
-10. **Not a bug — `batchDequeue()`'s speedup is unexplained.** With the
-   original 64-byte slots it measured **0.91x, i.e. slower** than the same
-   number of `dequeue()` calls. Since slots moved to 128 bytes (2026-10-26),
-   four runs measured it **1.05-1.43x faster** — every one of those rows
-   flagged UNSTABLE, and the cause of the change is not isolated (one variable
-   that moved alongside it: two of the four runs had the core probe reorder
-   cores). Reading
-   the implementation confirms why, independently of the measurement: its
-   loop body does exactly the same per-item work as `dequeue()` — one
-   `readTicket.fetch_add`, one seq spin, one move, one seq store — and then
-   additionally stages each item into `batchDequeueArray`. On paper it
-   amortizes nothing and adds a copy, so the recent speedup is not explained
-   by the source either. (An even earlier measurement of 1.66x *faster* was
-   an artifact of the SMT mispinning described under "Benchmarking".) Worth
-   knowing because the method's cost is an MPSC-only usage restriction, and
-   whether it buys anything is now unclear rather than settled. Isolating it
-   needs 64- and 128-byte slots measured in the same run on the same cores.
-   Separately, the structural fix stands on its own: claim a run of `count`
-   tickets with a single `fetch_add` rather than one per item — which is what
-   the `BufferBatchRework` branch is doing.
+10. **Not a bug — `batchDequeue()` doesn't amortize, and a slot-size
+   experiment explained a misleading "speedup".** With 64-byte slots it
+   measures **0.85-1.03x** the speed of the same number of `dequeue()` calls
+   across separate measurements — no real gain either way. Reading the implementation confirms why: its loop body does exactly
+   the same per-item work as `dequeue()` — one `readTicket.fetch_add`, one seq
+   spin, one move, one seq store — and then additionally stages each item into
+   `batchDequeueArray`. It amortizes nothing; it adds a copy. (An earlier
+   measurement of 1.66x *faster* was an artifact of the SMT mispinning
+   described under "Benchmarking".)
+
+   Slots were briefly padded to 128 bytes (2026-10-26) on the theory that it
+   would stop neighbouring slots interfering through Intel's adjacent-line
+   prefetcher, and batching then measured 1.05-1.43x *faster*. A same-run A/B
+   — three builds of one commit differing only in `alignas(64/128/256)`,
+   rotated across rounds on the same pinned physical cores — showed what
+   actually happened (ns/item, median across rounds; lower is better):
+
+   | Shape | 64 B | 128 B | 256 B |
+   |---|---|---|---|
+   | 1P/1C drain, `dequeue()` | **9.0** | 15.2 | 9.9 |
+   | 1P/1C drain, `batchDequeue(50)` | 10.6 | 11.5 | 10.1 |
+   | Ping-pong round trip (p50 cycles) | 473 | 459 | 478 |
+   | 2P/2C | **30.6** | 33.2 | 35.1 |
+   | 4P/4C | 34.7 | 35.0 | 34.8 |
+
+   Batching never got faster; plain `dequeue()` got ~60% *slower* at 128
+   bytes specifically (reproduced on two different core pairs), and the ratio
+   read that as a batching speedup. The prefetcher benefit didn't appear
+   either: the near-empty ping-pong handoff, where adjacent-slot interference
+   would matter most, was flat across all three sizes. 128 wasn't faster in
+   any shape, so slots went back to 64 bytes. Why 128 specifically slows the
+   drain (while 64 and 256 don't) is **not** isolated — proving a cause needs
+   hardware counters or prefetcher control, neither available under WSL2, and
+   this is one hybrid laptop part. Also ruled out along the way: the perf
+   test's per-item `doNotOptimize` clobber (spacing it to once per 50 items
+   changed nothing).
+
+   Left alone per the convention below; the fix, if wanted, is to claim a run
+   of `count` tickets with a single `fetch_add` rather than one per item —
+   which is what the `BufferBatchRework` branch is doing.
 
 These are left for deliberate fixes rather than patched inside the test
 files — the tests exist to locate and explain them precisely, not to paper

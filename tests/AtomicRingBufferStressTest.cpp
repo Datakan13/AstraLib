@@ -81,12 +81,12 @@
 
 // ── compile-time layout checks ───────────────────────────────────────────────
 namespace RB = AstraLib::Buffers;
-static_assert(sizeof(RB::Slot<int>) == 128,  "Slot<int> must be padded to 128 bytes");
-static_assert(alignof(RB::Slot<int>) == 128, "Slot must be 128-byte aligned");
-// Slots are padded to 128 bytes (two cache lines), not 64 — a deliberate
-// design choice: Intel's adjacent-line prefetcher fetches lines in 128-byte
-// pairs, so 64-byte slots would let neighbouring slots interfere. Payloads
-// over 120 bytes (128 - sizeof(seq)) are rejected by Slot's own static_assert.
+static_assert(sizeof(RB::Slot<int>) == 64,  "Slot<int> must be one cache line");
+static_assert(alignof(RB::Slot<int>) == 64, "Slot must be cache-line aligned");
+// Slots are one cache line for payloads up to 56 bytes (64 - sizeof(seq));
+// larger payloads, up to Slot's static_assert limit of 120 bytes, make the
+// slot two lines. 64-byte alignment is deliberate: 128 and 256 were measured
+// head to head and 128 was never faster (see docs/tests.md, finding 10).
 
 // ── thread-safe CHECK machinery ──────────────────────────────────────────────
 static std::atomic<long> g_failures{0};

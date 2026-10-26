@@ -38,9 +38,9 @@
 //                           copy/move happens while the slot is claimed but
 //                           not yet published, so payload size directly
 //                           widens that window. 120 bytes is what Slot's own
-//                           static_assert permits (128 - sizeof(seq)). Every
-//                           slot is 128 bytes regardless of payload, so this
-//                           isolates copy cost from slot footprint.
+//                           static_assert permits (128 - sizeof(seq)); note
+//                           that pushes sizeof(Slot) to 128, i.e. two cache
+//                           lines per slot.
 //
 // ── Timing methodology ──────────────────────────────────────────────────────
 //
@@ -154,9 +154,9 @@ namespace RB = AstraLib::Buffers;
 // ── layout expectations these numbers are interpreted against ───────────────
 struct Payload56  { char b[56];  };
 struct Payload120 { char b[120]; };
-static_assert(sizeof(RB::Slot<int>)        == 128, "Slot<int> is padded to 128B");
-static_assert(sizeof(RB::Slot<Payload56>)  == 128, "56B payload slot is 128B");
-static_assert(sizeof(RB::Slot<Payload120>) == 128, "120B payload slot is 128B");
+static_assert(sizeof(RB::Slot<int>)        == 64,  "Slot<int> should be one cache line");
+static_assert(sizeof(RB::Slot<Payload56>)  == 64,  "56B payload should still fit one line");
+static_assert(sizeof(RB::Slot<Payload120>) == 128, "120B payload spans two cache lines");
 
 // ── CHECK machinery (same shape as the rest of the suite) ───────────────────
 static std::atomic<long> g_failures{0};
@@ -754,9 +754,8 @@ static void benchBatch(uint64_t total) {
 //    claimed but before seq is published, so a larger payload holds the slot
 //    longer and directly widens the window a waiting thread spins in.
 //
-//    120 bytes is the largest Slot's static_assert allows (128 - sizeof(seq)).
-//    Slots are always 128 bytes (alignas(128)), so all three sizes have the
-//    same footprint and the differences here are the copy itself.
+//    120 bytes is the largest Slot's static_assert allows (128 - sizeof(seq)),
+//    which makes sizeof(Slot) 128 — two cache lines per slot rather than one.
 // ─────────────────────────────────────────────────────────────────────────────
 template <typename T>
 static double runPayloadOnce(uint64_t total) {
