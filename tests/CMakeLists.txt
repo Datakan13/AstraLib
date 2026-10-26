@@ -16,9 +16,9 @@ astra_test(PaddedAtomicTest)
 astra_test(AtomicFutexTest)
 astra_test(ThreadSafeIndexPoolTest)
 astra_test(ThreadPoolTest)
-# Each of its 6 sub-tests has its own internal bounded wait (up to 60s) to
-# give the still-open, intermittent task-loss bug room to surface cleanly
-# instead of getting cut off mid-diagnosis by a tighter ctest-level kill.
+# Each of its 6 sub-tests has its own internal bounded wait (up to 60s), so a
+# regression of the (fixed) intermittent task-loss bug surfaces as a diagnosed
+# failure instead of getting cut off mid-diagnosis by a tighter ctest kill.
 set_tests_properties(ThreadPoolTest PROPERTIES TIMEOUT 240)
 astra_test(TimerTest)
 astra_test(TimeNowTest)
@@ -46,7 +46,7 @@ set_tests_properties(SpscRingBufferTest PROPERTIES TIMEOUT 300)
 # throughput is deliberately NOT gated — the hosted CI runner's variance
 # would generate far more false failures than real regressions caught, and
 # several configurations are genuinely bimodal even on a quiet dev machine
-# (see the file header on ring-occupancy regimes).
+# (cause unidentified — see the file header and docs/tests.md finding 9).
 #
 # Labelled `perf` and excluded from the default run via `ctest -LE perf`
 # (see .github/workflows/ci.yml). Run it deliberately:

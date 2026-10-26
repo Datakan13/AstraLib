@@ -7,6 +7,7 @@
 
 // Buffers
 #include <AstraLib/Buffers/atomicRingBuffer.hpp>
+#include <AstraLib/Buffers/spscRingBuffer.hpp>
 
 // Debug
 #include <AstraLib/Debug/debugFunc.hpp>

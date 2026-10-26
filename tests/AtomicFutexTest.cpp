@@ -9,10 +9,10 @@
 // problem to remember. Confirmed intentional: wait() calling wake() BEFORE
 // it was invoked blocks forever (snapshots `expected` at call time, so a
 // stale post-wake value looks unchanged to it) — that's correct for this
-// model, not a bug. (wait()'s own doc comment currently claims the opposite
-// — "Will wait unless there has been a wake call" — which describes a
-// different, sticky/semaphore-like contract this implementation doesn't
-// provide; that comment is the thing that's wrong, not the behavior.)
+// model, not a bug. (wait() used to carry a doc comment — "Will wait unless
+// there has been a wake call" — describing a different, sticky/semaphore-
+// like contract this implementation doesn't provide; that comment has since
+// been removed.)
 //
 // Turn-taking usage (always wait() before the matching wake(), as in
 // test_repeated_turntaking_cycles) is the correct and only safe pattern.
